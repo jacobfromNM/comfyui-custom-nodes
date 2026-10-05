@@ -39,7 +39,7 @@ def add_tree(key, value):
 def load_file(base, path):
     key, ext = os.path.splitext(os.path.relpath(path, base))
     ext = ext.lower()
-    with open(path, encoding="utf-8", errors="ignore") as f:
+    with open(path, encoding="utf-8-sig", errors="ignore") as f:
         if ext == ".txt":
             # Blank lines and # comments are skipped, everything else is fair game
             wildcards[normalize(key)] = [l for l in f.read().splitlines() if l.strip() and not l.lstrip().startswith("#")]
@@ -120,7 +120,8 @@ def expand(text, seed):
         if not values:
             missing.add(m[0])
             return m[0]
-        return rng.choice(values)
+        # Seed walks the file in order: 0 = first line, 1 = second, wrapping around at the end
+        return values[seed % len(values)]
 
     # Wildcards can contain options and other wildcards, so keep unwrapping until nothing changes
     for _ in range(MAX_DEPTH):
