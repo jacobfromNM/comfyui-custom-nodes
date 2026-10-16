@@ -674,3 +674,83 @@ def apply_gain(img_float: np.ndarray, gain_map: np.ndarray, linear_light: bool =
             out[i:j, ..., 3:] = img_float[i:j, ..., 3:]
 
     return out
+
+
+
+# ---------------------------------------------------------------------------
+# De-blotch: evening out repeating soft patches
+# ---------------------------------------------------------------------------
+#
+# A different problem from lens vignetting, but the same family. When an image
+# model outpaints or extends a photo, it tends to copy any soft darkening it
+# sees (a leftover vignette, a cloud shadow) and repeat it as a motif across
+# the new area: big dark smudges every few hundred pixels.
+#
+# Those smudges vary side to side, while real landscape lighting mostly varies
+# top to bottom (bright sky, darker ground). So each spot is compared against
+# the average of its own height band across the full width, and big soft
+# departures from it get pulled back. All of it is done in log-luminance on a
+# small blurred copy, so fine detail (texture, small bright objects) never
+# drives the correction -- it only rides along with a very smooth gain map.
+
+def _gauss_kernel(sigma: float) -> np.ndarray:
+    r = max(1, int(np.ceil(3.0 * sigma)))
+    x = np.arange(-r, r + 1, dtype=np.float64)
+    k = np.exp(-0.5 * (x / sigma) ** 2)
+    return k / k.sum()
+
+
+def _blur_axis(a: np.ndarray, sigma: float, axis: int) -> np.ndarray:
+    """Separable Gaussian along one axis, mirrored at the edges so the border
+    column isn't smeared inward. Only ever run on analysis-size arrays."""
+    if sigma <= 0:
+        return a
+    k = _gauss_kernel(sigma)
+    r = len(k) // 2
+    pad = [(0, 0)] * a.ndim
+    pad[axis] = (r, r)
+    p = np.pad(a, pad, mode="symmetric")
+    return np.apply_along_axis(lambda v: np.convolve(v, k, mode="valid"), axis, p)
+
+
+def compute_deblotch_gain(img_float: np.ndarray, *, strength: float = 0.85,
+                          patch_size: float = 0.15, max_lift: float = 2.5,
+                          max_dim: float = 1.6, mask: np.ndarray | None = None,
+                          analysis_size: int = 256) -> np.ndarray:
+    """Returns a full-resolution (H, W) float32 gain map in linear light.
+
+    patch_size is the width of the patch finder as a fraction of image height;
+    its vertical reach is half that, since smudges tend to be tall and the
+    sky-to-ground gradient must not leak into the comparison. The local
+    average and the row reference share the exact same vertical weights, so
+    any purely vertical gradient cancels to a gain of 1.0 everywhere.
+
+    mask (any resolution, 1 = correct, 0 = leave alone) limits the fix to an
+    area such as the outpainted sides. It is softened horizontally by the
+    same amount as the patch finder so there's no seam at its edge.
+    """
+    h, w = img_float.shape[:2]
+    luma, _, sh, sw = downsampled_luma(img_float, analysis_size)
+    log_l = np.log(np.maximum(luma, EPS))
+
+    sx = 0.5 * patch_size * sh
+    sy = 0.25 * patch_size * sh
+    local = _blur_axis(_blur_axis(log_l, sx, 1), sy, 0)
+    row = _blur_axis(log_l.mean(axis=1, keepdims=True), sy, 0)
+
+    lg = strength * (row - local)
+    np.clip(lg, -np.log(max(max_dim, 1.0)), np.log(max(max_lift, 1.0)), out=lg)
+
+    if mask is not None:
+        m = _box_matrix(mask.shape[0], sh) @ mask.astype(np.float64) @ _box_matrix(mask.shape[1], sw).T
+        lg *= np.clip(_blur_axis(m, 0.5 * sx, 1), 0.0, 1.0)
+
+    # Bilinear upsample of a field this smooth is indistinguishable from
+    # anything fancier, and it's done in log space so the curve stays even
+    up = Image.fromarray(lg.astype(np.float32)).resize((w, h), Image.BILINEAR)
+    return np.exp(np.asarray(up, dtype=np.float32))
+
+#     _
+# .__(.)< (meow.)
+#  \__)
+# ~~~~~~~~~~~~~~

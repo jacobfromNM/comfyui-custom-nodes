@@ -18,8 +18,9 @@ ComfyUI/custom_nodes/comfyui-devignette/
     README.md
 ```
 
-Restart ComfyUI. You'll find the node under **image/postprocessing ->
-De-Vignette (Auto Detect + Correct)**.
+Restart ComfyUI. You'll find both nodes under **image/postprocessing**:
+**De-Vignette (Auto Detect + Correct)** and **De-Blotch (Even Out Repeating
+Patches)**.
 
 No extra Python packages required -- it only uses `numpy`, `Pillow`, and
 `torch`, all of which ComfyUI already depends on.
@@ -145,3 +146,36 @@ gigabytes a naive float64 implementation needs at that size.
 - **Very fast falloff (mustache-shaped vignette from extreme wide-angle or
   fisheye lenses)** isn't well modeled by the r²/r⁴/r⁶ terms used here and
   may under-correct near the very edge.
+
+## De-Blotch (Even Out Repeating Patches)
+
+A companion node for a related problem. When an image model outpaints or
+extends a photo, it tends to copy any soft darkening it sees (a leftover
+vignette, a cloud shadow) and repeat it across the new area as big dark
+smudges every few hundred pixels.
+
+Those smudges vary side to side, while real landscape lighting mostly varies
+top to bottom. So De-Blotch compares each spot with the average brightness of
+its own height band across the full width, and pulls big soft departures back
+toward it. It works in log-luminance on a small blurred copy, so fine detail
+never drives the correction. The local average and the row reference use the
+same vertical weighting, so a purely vertical gradient (sky over ground) is
+left exactly as it is.
+
+Connect a mask (for example the outpaint mask) to limit it to the generated
+areas. The mask edge is blended softly, so there's no seam against the
+original photo.
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `strength` | 0.85 | How far patches are pulled toward their surroundings. 1.0 = fully, 0 = nothing |
+| `patch_size` | 0.15 | Patch width as a fraction of image height. Smaller catches tighter smudges but starts evening out real shapes |
+| `max_lift` | 2.5 | The most a dark patch can be brightened (linear light) |
+| `max_dim` | 1.6 | The most a bright patch can be darkened. 1.0 = only ever brighten |
+| `protect_highlights` | True | Same highlight roll-off as De-Vignette |
+| `mask` | optional | Only correct the white areas |
+
+Limitation: it can't tell a smudge from real darkness that changes side to
+side, such as a single large cloud shadow or one dark hill. Those get softened
+too. `max_lift` and a larger `patch_size` are the guards. About 0.5 s on a
+2560x720 image, about 5 s at 24 MP.

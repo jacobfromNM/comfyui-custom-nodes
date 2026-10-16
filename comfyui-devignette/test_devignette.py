@@ -261,6 +261,74 @@ def benchmark(folder, long_edge=900, limit=16):
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# de-blotch
+# ---------------------------------------------------------------------------
+
+def _landscape(h=360, w=1280, seed=0):
+    """Bright sky over darker ground with fine texture: the vertical lighting
+    de-blotch must leave alone."""
+    rng = np.random.default_rng(seed)
+    y = np.linspace(0.0, 1.0, h)[:, None, None]
+    base = np.where(y < 0.45, 0.75 - 0.2 * y, 0.35 - 0.1 * y)
+    tex = 1.0 + 0.15 * (rng.random((h, w, 1)) - 0.5)
+    return np.clip(np.repeat(base * tex, 3, axis=2), 0.0, 1.0).astype(np.float32)
+
+
+def _with_blotches(img, period=320, depth=0.45):
+    """Multiplies in soft dark patches that repeat side to side, like an
+    outpaint copying a vignette across the frame."""
+    h, w = img.shape[:2]
+    x = np.arange(w)[None, :]
+    y = np.arange(h)[:, None]
+    d = np.cos(2 * np.pi * x / period) * 0.5 + 0.5
+    blot = 1.0 - depth * d ** 4 * np.exp(-((y - 0.65 * h) / (0.3 * h)) ** 2)
+    lin = core.srgb_to_linear(img) * blot[..., None]
+    return core.linear_to_srgb(lin).astype(np.float32)
+
+
+def _column_swing(img, rows):
+    """How much brightness swings side to side within a band of rows."""
+    luma = img[rows].mean(axis=(0, 2))
+    return float(luma.std())
+
+
+def test_deblotch_leaves_vertical_lighting_alone():
+    print("\nde-blotch: sky-to-ground gradient untouched")
+    img = _landscape()
+    gain = core.compute_deblotch_gain(img)
+    check(np.abs(gain - 1.0).max() < 0.03, "no correction on a side-to-side-even landscape",
+          "worst gain %.3f" % np.abs(gain - 1.0).max())
+
+
+def test_deblotch_evens_out_repeating_patches():
+    print("\nde-blotch: repeating patches evened out")
+    clean = _landscape(seed=1)
+    blotched = _with_blotches(clean)
+    out = core.apply_gain(blotched, core.compute_deblotch_gain(blotched, strength=1.0))
+    rows = slice(180, 300)
+    before, after = _column_swing(blotched, rows), _column_swing(out, rows)
+    check(after < 0.35 * before, "side-to-side swing cut by at least 65%",
+          "before %.4f after %.4f" % (before, after))
+
+
+def test_deblotch_mask_and_strength_zero_are_identity():
+    print("\nde-blotch: passthrough")
+    img = _with_blotches(_landscape(seed=2))
+    g0 = core.compute_deblotch_gain(img, strength=0.0)
+    gm = core.compute_deblotch_gain(img, mask=np.zeros((90, 320), np.float32))
+    check(np.abs(g0 - 1.0).max() < 1e-5, "strength=0 is a no-op")
+    check(np.abs(gm - 1.0).max() < 1e-5, "an all-black mask is a no-op (any mask size)")
+
+
+def test_deblotch_respects_limits():
+    print("\nde-blotch: max_lift / max_dim")
+    img = _with_blotches(_landscape(seed=3), depth=0.8)
+    gain = core.compute_deblotch_gain(img, strength=1.0, max_lift=1.3, max_dim=1.1)
+    check(gain.max() <= 1.3 + 1e-4 and gain.min() >= 1 / 1.1 - 1e-4, "gain stays inside the limits",
+          "range %.3f..%.3f" % (gain.min(), gain.max()))
+
+
 if __name__ == "__main__":
     test_gain_is_monotone_and_never_darkens()
     test_max_gain_is_respected()
@@ -271,6 +339,10 @@ if __name__ == "__main__":
     test_center_offset_moves_the_center()
     test_downsample_averages_in_linear_light()
     test_auto_mode_catches_reverse_vignette()
+    test_deblotch_leaves_vertical_lighting_alone()
+    test_deblotch_evens_out_repeating_patches()
+    test_deblotch_mask_and_strength_zero_are_identity()
+    test_deblotch_respects_limits()
 
     if len(sys.argv) > 1:
         benchmark(sys.argv[1])
@@ -279,3 +351,8 @@ if __name__ == "__main__":
 
     print("\n" + ("ALL PASS" if not FAILURES else "FAILED: " + ", ".join(FAILURES)))
     sys.exit(1 if FAILURES else 0)
+
+#     _
+# .__(.)< (meow.)
+#  \__)
+# ~~~~~~~~~~~~~~
