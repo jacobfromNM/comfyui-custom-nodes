@@ -33,6 +33,7 @@ For full checkpoints (SD1.5, SDXL, Pony, Illustrious, ...).
 - Slots with a wired-in model report `model_name` as `model_input_N`.
 - Only the loaders feeding the current job's slot actually run, so merge chains for the other slots don't cost anything.
 - The workflow embedded in each saved image shows all 4 slots, not just the one that produced it.
+- After a compare run, the node shows a side-by-side gallery of each job's final image, captioned with its model name. Click an image to open it full size. The gallery isn't saved with the workflow and resets on the next run.
 
 ## How it works
 
