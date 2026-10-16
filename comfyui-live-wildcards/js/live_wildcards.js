@@ -15,11 +15,17 @@ app.registerExtension({
       const picker = this.widgets.find((w) => w.name === "add_wildcard");
       const callback = picker.callback;
 
-      // The dropdown is really a button: append the pick to the text, then snap back to the placeholder
+      // The dropdown is really a button: drop the pick at the cursor, then snap back to the placeholder
       picker.callback = function (value) {
         callback?.apply(this, arguments);
         if (value === PICK) return;
-        text.value = text.value.trim() ? `${text.value.trimEnd()}, ${value}` : value;
+        // The textarea remembers its caret even after the dropdown steals focus - no textarea, no caret, so the end it is
+        const el = text.inputEl ?? text.element;
+        const at = el?.selectionStart ?? text.value.length;
+        const end = el?.selectionEnd ?? at;
+        text.value = text.value.slice(0, at) + value + text.value.slice(end);
+        // Park the caret after the new wildcard so back-to-back picks line up instead of piling up in reverse
+        el?.setSelectionRange(at + value.length, at + value.length);
         picker.value = PICK;
         app.graph.setDirtyCanvas(true);
       };

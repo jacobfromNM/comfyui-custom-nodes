@@ -144,7 +144,7 @@ class LiveWildcards:
                 "text": ("STRING", {"multiline": True, "dynamicPrompts": False,
                                     "tooltip": "Your prompt. __name__ pulls a random line from name.txt, {a|b|c} picks one option."}),
                 "add_wildcard": ([PICK] + [f"__{k}__" for k in sorted(wildcards)],
-                                 {"tooltip": "Pick one to add it to the end of the text. Files live in models/wildcards."}),
+                                 {"tooltip": "Pick one to insert it at the text cursor. Files live in models/wildcards."}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "control_after_generate": True}),
             }
         }

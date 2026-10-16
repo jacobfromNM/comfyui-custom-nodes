@@ -32,4 +32,4 @@ Put your files in `ComfyUI/models/wildcards`. The folder is created on first lau
 
 Wildcards and options can be nested inside each other and inside wildcard files. Every wildcard in a prompt uses the same line number, while `{...}` options are picked randomly from the seed. The same seed always gives the same result. Blank lines and `#` comments don't count as lines. If a wildcard has no matching file, it's left in the text as-is and a warning is logged.
 
-The **add_wildcard** dropdown adds the wildcard you pick to the end of your text.
+The **add_wildcard** dropdown inserts the wildcard you pick at the text cursor (replacing any selected text), with no separator added.
