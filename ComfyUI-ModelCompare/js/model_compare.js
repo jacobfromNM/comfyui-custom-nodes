@@ -19,8 +19,10 @@ function activeSlots(inputs, { combo, links }) {
   return slots;
 }
 
-// prompt_id -> [{ node, label }], so finished images can find their way home
+// prompt_id -> { targets: [{ node, job, round, label }], saved }, so finished images can find their way home
 const pending = new Map();
+// prompt_id -> cached node ids. Kept apart since it can show up before /prompt even answers us
+const cachedNodes = new Map();
 
 // What the Python side would call this slot, minus folders so captions stay short
 function slotLabel(inputs, { combo, links }, i) {
@@ -39,8 +41,10 @@ function gallery(node) {
   return node.compareGallery;
 }
 
-function showResult(node, job, label, images) {
+function showResult(node, { job, round, label }, images) {
   const g = gallery(node);
+  // A slow job from an older Run must not stomp on a newer Run's picture
+  if (g.cells[job] && round < g.cells[job].round) return;
   // Slot each job into its own cell so out-of-order finishes don't shuffle the grid
   if (!g.cells[job]) {
     const cell = document.createElement("figure");
@@ -50,6 +54,9 @@ function showResult(node, job, label, images) {
     g.el.replaceChildren(...g.cells.filter(Boolean));
   }
   const img = images[0];
+  g.cells[job].round = round;
+  // Only a result from the latest Run counts as fresh, older ones stay dimmed
+  g.cells[job].style.opacity = round === node.compareRound ? 1 : 0.5;
   const url = api.apiURL(`/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`);
   g.cells[job].querySelector("a").href = url;
   g.cells[job].querySelector("img").src = url;
@@ -61,14 +68,24 @@ app.registerExtension({
   setup() {
     const queuePrompt = api.queuePrompt.bind(api);
 
-    // Last image-producing node in each job wins, which is usually the final save/preview
+    // Cached nodes get their old images replayed as "executed" too, so remember which ones to ignore
+    api.addEventListener("execution_cached", ({ detail }) => cachedNodes.set(detail.prompt_id, new Set(detail.nodes)));
+    // Output node finish order isn't fixed, so a saved image beats any preview,
+    // and among equals the last one wins
     api.addEventListener("executed", ({ detail }) => {
-      const targets = pending.get(detail.prompt_id);
-      if (!targets || !detail.output?.images?.length) return;
-      for (const t of targets) showResult(t.node, t.job, t.label, detail.output.images);
+      const entry = pending.get(detail.prompt_id);
+      const images = detail.output?.images;
+      if (!entry || !images?.length || cachedNodes.get(detail.prompt_id)?.has(detail.node)) return;
+      const saved = images[0].type === "output";
+      if (entry.saved && !saved) return;
+      entry.saved ||= saved;
+      for (const t of entry.targets) showResult(t.node, t, images);
     });
     for (const ev of ["execution_success", "execution_error", "execution_interrupted"]) {
-      api.addEventListener(ev, ({ detail }) => pending.delete(detail?.prompt_id));
+      api.addEventListener(ev, ({ detail }) => {
+        pending.delete(detail?.prompt_id);
+        cachedNodes.delete(detail?.prompt_id);
+      });
     }
 
     // One Run click -> one job per filled slot, all sharing the same seed.
@@ -86,8 +103,17 @@ app.registerExtension({
       if (jobs < 2) return queuePrompt(number, data, ...rest);
 
       const originals = compare.map((n) => ({ ...n.inputs }));
-      // Fresh run, fresh gallery
-      for (const n of compare) if (n.node?.compareGallery) n.node.compareGallery.cells = [];
+      // New Run: bump the round, drop cells for slots that went away, and dim the
+      // rest until their new picture lands
+      for (const { node } of compare) {
+        if (!node) continue;
+        node.compareRound = (node.compareRound ?? 0) + 1;
+        const g = node.compareGallery;
+        if (!g) continue;
+        g.cells.length = Math.min(g.cells.length, jobs);
+        g.el.replaceChildren(...g.cells.filter(Boolean));
+        for (const cell of g.cells) if (cell) cell.style.opacity = 0.5;
+      }
       let res;
       for (let job = 0; job < jobs; job++) {
         const targets = [];
@@ -102,11 +128,11 @@ app.registerExtension({
             n.inputs[`${n.cfg.combo}_${i}`] = "None";
           }
           // Nodes tucked inside subgraphs won't resolve here, they just go without a gallery
-          if (n.node) targets.push({ node: n.node, job, label: slotLabel(originals[k], n.cfg, keep) });
+          if (n.node) targets.push({ node: n.node, job, round: n.node.compareRound, label: slotLabel(originals[k], n.cfg, keep) });
         });
         // queuePrompt stringifies right away, so tweaking in place between jobs is safe
         res = await queuePrompt(number, data, ...rest);
-        if (res?.prompt_id && targets.length) pending.set(res.prompt_id, targets);
+        if (res?.prompt_id && targets.length) pending.set(res.prompt_id, { targets, saved: false });
       }
       return res;
     };
