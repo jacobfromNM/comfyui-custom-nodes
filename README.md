@@ -4,7 +4,7 @@ A small collection of ComfyUI custom nodes. Each folder is its own node pack.
 
 | Pack | What it does |
 |---|---|
-| [ComfyUI-ModelCompare](ComfyUI-ModelCompare/) | Compare up to 4 diffusion models or checkpoints at the same seed with a single Run click |
+| [ComfyUI-ModelCompare](ComfyUI-ModelCompare/) | Compare up to 16 diffusion models or checkpoints at the same seed with a single Run click |
 | [comfyui-devignette](comfyui-devignette/) | Detects and removes lens vignetting (dark corners) while leaving real scene lighting alone |
 | [comfyui-live-wildcards](comfyui-live-wildcards/) | Wildcard prompt node that picks up edits to your wildcard files without a restart |
 
