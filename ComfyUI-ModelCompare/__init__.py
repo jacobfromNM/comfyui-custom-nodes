@@ -4,12 +4,15 @@ import comfy.sd
 import folder_paths
 import nodes
 
-SLOTS = 4
+# Hard ceiling on slots. The +/- buttons in the JS just hide/show these, so
+# keep this in sync with MAX_SLOTS in js/model_compare.js
+SLOTS = 16
 
 
 class ModelCompareLoader:
     # The JS side queues one job per filled slot and blanks the rest, so by the
     # time we run there's (normally) exactly one model to load. Nice and lazy.
+    # All 16 slots exist here, the frontend just hides the ones you haven't added.
     @classmethod
     def INPUT_TYPES(s):
         unets = ["None"] + folder_paths.get_filename_list("diffusion_models")
@@ -32,7 +35,7 @@ class ModelCompareLoader:
             name = kwargs[f"unet_{i}"]
             if name != "None":
                 return (nodes.UNETLoader().load_unet(name, weight_dtype)[0], seed, name.rsplit(".", 1)[0])
-        raise ValueError("Model Compare: all 4 slots are empty, pick at least one model.")
+        raise ValueError("Model Compare: all slots are empty, pick at least one model.")
 
 
 class CheckpointCompareLoader:
@@ -67,12 +70,12 @@ class CheckpointCompareLoader:
                                                         embedding_directory=folder_paths.get_folder_paths("embeddings"))
             label = f"model_input_{i}" if model is not None else os.path.splitext(name)[0]
             return (out[0] if model is None else model, out[1] if clip is None else clip, out[2], seed, label)
-        raise ValueError("Checkpoint Compare: all 4 slots are empty, pick at least one checkpoint.")
+        raise ValueError("Checkpoint Compare: all slots are empty, pick at least one checkpoint.")
 
 
 WEB_DIRECTORY = "./js"
 NODE_CLASS_MAPPINGS = {"ModelCompareLoader": ModelCompareLoader, "CheckpointCompareLoader": CheckpointCompareLoader}
-NODE_DISPLAY_NAME_MAPPINGS = {"ModelCompareLoader": "Model Compare Loader (x4)", "CheckpointCompareLoader": "Checkpoint Compare Loader (x4)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"ModelCompareLoader": "Model Compare Loader", "CheckpointCompareLoader": "Checkpoint Compare Loader"}
 
 #     _
 # .__(.)< (meow.)

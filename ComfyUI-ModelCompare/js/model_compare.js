@@ -1,13 +1,48 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const SLOTS = 4;
+// Python declares all of these (keep in sync with SLOTS in __init__.py), the
+// +/- buttons just decide how many are actually on show
+const SLOTS = 16;
+const DEFAULT_SLOTS = 2; // fresh nodes start as a plain A/B test
+const LEGACY_SLOTS = 4; // workflows saved before +/- existed had exactly 4
 
-// Per node type: the dropdown name and the linkable inputs in each slot
+// Per node type: the dropdown name, the linkable inputs in each slot (and their
+// types, so removed sockets can be rebuilt), and what to call a slot on the buttons
 const COMPARE_NODES = {
-  ModelCompareLoader: { combo: "unet", links: ["model"] },
-  CheckpointCompareLoader: { combo: "ckpt_name", links: ["model", "clip"] },
+  ModelCompareLoader: { combo: "unet", links: ["model"], types: { model: "MODEL" }, noun: "model" },
+  CheckpointCompareLoader: { combo: "ckpt_name", links: ["model", "clip"], types: { model: "MODEL", clip: "CLIP" }, noun: "checkpoint" },
 };
+
+// Show the first n slots and tuck the rest away. Dropdowns get hidden (not
+// removed) so widgets_values keeps its positions, while link-only sockets are
+// genuinely removed/re-added since inputs save by name anyway.
+function applySlots(node, cfg, n, resize = false) {
+  n = Math.max(1, Math.min(SLOTS, n));
+  node.properties.compareSlots = n;
+  for (let i = 1; i <= SLOTS; i++) {
+    const show = i <= n;
+    const w = node.widgets?.find((w) => w.name === `${cfg.combo}_${i}`);
+    if (w) {
+      if (!show && !w.hidden) {
+        // A removed slot forgets its pick, otherwise it'd sneak into the next Run
+        w.value = "None";
+        const s = node.inputs?.findIndex((inp) => inp.widget?.name === w.name) ?? -1;
+        if (s !== -1 && node.inputs[s].link != null) node.disconnectInput(s);
+      }
+      w.hidden = !show;
+    }
+    for (const l of cfg.links) {
+      const idx = node.findInputSlot(`${l}_${i}`);
+      if (!show && idx !== -1) node.removeInput(idx);
+      else if (show && idx === -1) node.addInput(`${l}_${i}`, cfg.types[l]);
+    }
+  }
+  // Only snap the size when a button was clicked, so loading a workflow keeps
+  // whatever size you dragged the node to
+  if (resize) node.setSize([node.size[0], node.computeSize()[1]]);
+  node.setDirtyCanvas(true, true);
+}
 
 // Which slots on this node actually have something in them. Linked inputs show
 // up in the API prompt as [nodeId, outputIndex] arrays, dropdowns as strings.
@@ -65,6 +100,52 @@ function showResult(node, { job, round, label }, images) {
 
 app.registerExtension({
   name: "ModelCompare.QueuePerModel",
+  beforeRegisterNodeDef(nodeType, nodeData) {
+    const cfg = COMPARE_NODES[nodeData.name];
+    if (!cfg) return;
+
+    // Every new node (loaded ones too, configure runs right after) gets its
+    // +/- buttons parked right under the last slot
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const r = onNodeCreated?.apply(this, arguments);
+      const count = () => this.properties.compareSlots ?? DEFAULT_SLOTS;
+      const plus = this.addWidget("button", `+ Add ${cfg.noun}`, null, () => applySlots(this, cfg, count() + 1, true), { serialize: false });
+      const minus = this.addWidget("button", `- Remove ${cfg.noun}`, null, () => applySlots(this, cfg, count() - 1, true), { serialize: false });
+      // Belt and braces: buttons must never take a seat in widgets_values
+      plus.serialize = minus.serialize = false;
+      const last = this.widgets.findIndex((w) => w.name === `${cfg.combo}_${SLOTS}`);
+      if (last !== -1) {
+        this.widgets.splice(this.widgets.indexOf(plus), 1);
+        this.widgets.splice(this.widgets.indexOf(minus), 1);
+        this.widgets.splice(last + 1, 0, plus, minus);
+      }
+      applySlots(this, cfg, DEFAULT_SLOTS, true);
+      return r;
+    };
+
+    // Old 4-slot workflows: no slot count saved, and their widgets_values are
+    // laid out for 4 dropdowns. Pad in the 12 missing "None"s so the seed and
+    // dtype don't end up crammed into unet_5 and friends.
+    const configure = nodeType.prototype.configure;
+    nodeType.prototype.configure = function (info) {
+      if (info && info.properties?.compareSlots == null) {
+        const vals = info.widgets_values;
+        info = { ...info, properties: { ...info.properties, compareSlots: LEGACY_SLOTS } };
+        if (Array.isArray(vals) && vals.length < SLOTS) {
+          info.widgets_values = [...vals.slice(0, LEGACY_SLOTS), ...Array(SLOTS - LEGACY_SLOTS).fill("None"), ...vals.slice(LEGACY_SLOTS)];
+        }
+      }
+      return configure.call(this, info);
+    };
+
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+      const r = onConfigure?.apply(this, arguments);
+      applySlots(this, cfg, this.properties.compareSlots ?? LEGACY_SLOTS);
+      return r;
+    };
+  },
   setup() {
     const queuePrompt = api.queuePrompt.bind(api);
 
