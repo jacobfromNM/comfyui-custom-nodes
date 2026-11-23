@@ -37,7 +37,7 @@ For full checkpoints (SD1.5, SDXL, Pony, Illustrious, ...).
 - Slots with a wired-in model report `model_name` as `model_input_N`.
 - Only the loaders feeding the current job's slot actually run, so merge chains for the other slots don't cost anything.
 - The workflow embedded in each saved image shows every slot, not just the one that produced it.
-- After a compare run, the node shows a side-by-side gallery of each job's final image, captioned with its model name. Click an image to open it full size. Saved images win over previews. On the next run the old images dim until each slot's new image lands. The gallery isn't saved with the workflow.
+- After a compare run, the node shows a side-by-side gallery of each job's final image, captioned with its model name. Click an image to open it full size. Saved images win over previews, videos (e.g. from SaveVideo) play inline, and only output nodes downstream of the compare node count. Fully cached reruns still refresh the gallery. On the next run the old images dim until each slot's new image lands. The gallery isn't saved with the workflow.
 
 ## How it works
 

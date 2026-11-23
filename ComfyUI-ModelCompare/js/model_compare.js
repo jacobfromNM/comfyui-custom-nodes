@@ -54,10 +54,49 @@ function activeSlots(inputs, { combo, links }) {
   return slots;
 }
 
-// prompt_id -> { targets: [{ node, job, round, label }], saved }, so finished images can find their way home
+// prompt_id -> { targets: [{ node, job, round, label, downstream, saved }] }, so finished images can find their way home
 const pending = new Map();
-// prompt_id -> cached node ids. Kept apart since it can show up before /prompt even answers us
-const cachedNodes = new Map();
+// A fully cached job can finish before /prompt even answers us, so its events
+// wait here (prompt_id -> [detail]) until we know who they belong to
+const early = new Map();
+// prompt_ids that already wrapped up, in case they beat their own registration
+const finished = new Set();
+const BUFFER_CAP = 64; // nobody needs a museum of stale prompt ids
+
+// Keep the little side buffers from growing forever if a prompt never claims them
+function trim(coll) {
+  while (coll.size > BUFFER_CAP) coll.delete(coll.keys().next().value);
+}
+
+// Every node in the API prompt that (eventually) eats this node's output. Only
+// output nodes in here get to put pictures in the gallery, so an unrelated
+// reference-image preview can't photobomb the comparison.
+function downstreamOf(prompt, rootId) {
+  const kids = new Map();
+  for (const [id, n] of Object.entries(prompt)) {
+    for (const v of Object.values(n.inputs ?? {})) {
+      if (Array.isArray(v) && v.length === 2) {
+        const src = String(v[0]);
+        if (!kids.has(src)) kids.set(src, []);
+        kids.get(src).push(id);
+      }
+    }
+  }
+  const seen = new Set();
+  const todo = [String(rootId)];
+  while (todo.length) {
+    for (const k of kids.get(todo.pop()) ?? []) {
+      if (!seen.has(k)) {
+        seen.add(k);
+        todo.push(k);
+      }
+    }
+  }
+  return seen;
+}
+
+// Videos (SaveVideo and friends report them under "images" too) need a <video>, an <img> just shows a sad broken icon
+const isVideo = (img) => /\.(mp4|webm|mov|mkv|m4v|avi)$/i.test(img.filename) || img.format?.startsWith?.("video/");
 
 // What the Python side would call this slot, minus folders so captions stay short
 function slotLabel(inputs, { combo, links }, i) {
@@ -84,18 +123,47 @@ function showResult(node, { job, round, label }, images) {
   if (!g.cells[job]) {
     const cell = document.createElement("figure");
     cell.style.cssText = "margin:0;display:flex;flex-direction:column;min-width:0;";
-    cell.innerHTML = '<a target="_blank"><img style="width:100%;height:100%;object-fit:contain;min-height:0"></a><figcaption style="font-size:11px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></figcaption>';
+    cell.innerHTML = '<a target="_blank"></a><figcaption style="font-size:11px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></figcaption>';
     g.cells[job] = cell;
     g.el.replaceChildren(...g.cells.filter(Boolean));
   }
   const img = images[0];
-  g.cells[job].round = round;
+  const cell = g.cells[job];
+  cell.round = round;
   // Only a result from the latest Run counts as fresh, older ones stay dimmed
-  g.cells[job].style.opacity = round === node.compareRound ? 1 : 0.5;
-  const url = api.apiURL(`/view?${new URLSearchParams({ filename: img.filename, subfolder: img.subfolder, type: img.type })}`);
-  g.cells[job].querySelector("a").href = url;
-  g.cells[job].querySelector("img").src = url;
-  g.cells[job].querySelector("figcaption").textContent = g.cells[job].title = label;
+  cell.style.opacity = round === node.compareRound ? 1 : 0.5;
+  // subfolder can be missing entirely, and "undefined" is not a folder anyone has.
+  // The rand param stops the browser serving a stale copy when a filename gets reused.
+  const params = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder ?? "", type: img.type ?? "output", rand: Math.random() });
+  const url = api.apiURL(`/view?${params}`);
+  // Swap in the right kind of media element, a video in an <img> is how we got broken icons
+  const tag = isVideo(img) ? "VIDEO" : "IMG";
+  const a = cell.querySelector("a");
+  let media = a.firstElementChild;
+  if (media?.tagName !== tag) {
+    media = document.createElement(tag);
+    media.style.cssText = "width:100%;height:100%;object-fit:contain;min-height:0;display:block";
+    if (tag === "VIDEO") Object.assign(media, { autoplay: true, loop: true, muted: true, playsInline: true });
+    a.replaceChildren(media);
+  }
+  a.href = url;
+  media.src = url;
+  cell.querySelector("figcaption").textContent = cell.title = label;
+}
+
+// One "executed" event -> hand it to every gallery it belongs to
+function deliver(entry, detail) {
+  const images = detail.output?.images;
+  if (!images?.length) return;
+  // Output node finish order isn't fixed, so a saved file beats any preview,
+  // and among equals the last one wins
+  const saved = images[0].type === "output";
+  for (const t of entry.targets) {
+    if (!t.downstream.has(String(detail.node)) && !t.downstream.has(String(detail.display_node))) continue;
+    if (t.saved && !saved) continue;
+    t.saved ||= saved;
+    showResult(t.node, t, images);
+  }
 }
 
 app.registerExtension({
@@ -149,25 +217,34 @@ app.registerExtension({
   setup() {
     const queuePrompt = api.queuePrompt.bind(api);
 
-    // Cached nodes get their old images replayed as "executed" too, so remember which ones to ignore
-    api.addEventListener("execution_cached", ({ detail }) => cachedNodes.set(detail.prompt_id, new Set(detail.nodes)));
-    // Output node finish order isn't fixed, so a saved image beats any preview,
-    // and among equals the last one wins
+    // Cached output nodes get their results re-sent as "executed" for THIS prompt,
+    // and those are the right pictures for this job, so they count too. (Ignoring
+    // them is why re-running the same seed/models never refreshed anything.)
     api.addEventListener("executed", ({ detail }) => {
       const entry = pending.get(detail.prompt_id);
-      const images = detail.output?.images;
-      if (!entry || !images?.length || cachedNodes.get(detail.prompt_id)?.has(detail.node)) return;
-      const saved = images[0].type === "output";
-      if (entry.saved && !saved) return;
-      entry.saved ||= saved;
-      for (const t of entry.targets) showResult(t.node, t, images);
+      if (entry) return deliver(entry, detail);
+      // Too early to know who this is for, park it until the job is registered
+      if (!early.has(detail.prompt_id)) early.set(detail.prompt_id, []);
+      early.get(detail.prompt_id).push(detail);
+      trim(early);
     });
     for (const ev of ["execution_success", "execution_error", "execution_interrupted"]) {
       api.addEventListener(ev, ({ detail }) => {
-        pending.delete(detail?.prompt_id);
-        cachedNodes.delete(detail?.prompt_id);
+        const id = detail?.prompt_id;
+        if (pending.delete(id)) return;
+        // Finished before we even registered it, leave a note for the registration
+        finished.add(id);
+        trim(finished);
       });
     }
+    // Wire a freshly queued job up, then replay anything that raced ahead of us
+    const register = (id, targets) => {
+      const entry = { targets };
+      for (const detail of early.get(id) ?? []) deliver(entry, detail);
+      early.delete(id);
+      if (finished.delete(id)) return; // already done, nothing more is coming
+      pending.set(id, entry);
+    };
 
     // One Run click -> one job per filled slot, all sharing the same seed.
     // The seed widget's fixed/increment/decrement/randomize only kicks in once
@@ -177,7 +254,7 @@ app.registerExtension({
         .filter(([, n]) => n.class_type in COMPARE_NODES)
         .map(([id, n]) => {
           const cfg = COMPARE_NODES[n.class_type];
-          return { node: app.graph.getNodeById(id), inputs: n.inputs, cfg, slots: activeSlots(n.inputs, cfg) };
+          return { node: app.graph.getNodeById(id), inputs: n.inputs, cfg, slots: activeSlots(n.inputs, cfg), downstream: downstreamOf(data.output, id) };
         })
         .filter((n) => n.slots.length);
       const jobs = Math.max(0, ...compare.map((n) => n.slots.length));
@@ -209,11 +286,11 @@ app.registerExtension({
             n.inputs[`${n.cfg.combo}_${i}`] = "None";
           }
           // Nodes tucked inside subgraphs won't resolve here, they just go without a gallery
-          if (n.node) targets.push({ node: n.node, job, round: n.node.compareRound, label: slotLabel(originals[k], n.cfg, keep) });
+          if (n.node) targets.push({ node: n.node, job, round: n.node.compareRound, label: slotLabel(originals[k], n.cfg, keep), downstream: n.downstream, saved: false });
         });
         // queuePrompt stringifies right away, so tweaking in place between jobs is safe
         res = await queuePrompt(number, data, ...rest);
-        if (res?.prompt_id && targets.length) pending.set(res.prompt_id, { targets, saved: false });
+        if (res?.prompt_id && targets.length) register(res.prompt_id, targets);
       }
       return res;
     };
